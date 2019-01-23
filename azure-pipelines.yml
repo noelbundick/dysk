@@ -1,0 +1,66 @@
+pool:
+  vmImage: ubuntu-16.04
+
+variables:
+  GOBIN:  '$(GOPATH)/bin' # Go binaries path
+  GOROOT: '/usr/local/go1.11' # Go installation path
+  GOPATH: '$(system.defaultWorkingDirectory)/gopath' # Go workspace path
+  modulePath: '$(GOPATH)/src/github.com/khenidak/dysk' # Path to the module's code
+  storageAccount: dyskbinaries
+  blobContainer: dysk
+
+
+steps:
+- script: |
+    TARGETS=$(apt-cache search '^linux-headers-4(.*)-azure$' | sed 's/\s.*$//')
+    TARGETS=linux-headers-$(uname -r)
+    sudo apt-get install -y $TARGETS
+    for t in $TARGETS; do
+      RELEASE=$(echo $t | sed 's/linux-headers-//')
+      make -C /lib/modules/$RELEASE/build/ M=$PWD modules
+      mkdir -p $(Build.ArtifactStagingDirectory)/$RELEASE
+      cp dysk.ko $(Build.ArtifactStagingDirectory)/$RELEASE
+    done
+  workingDirectory: module
+  displayName: Build kernel module
+  
+- script: |
+    mkdir -p '$(GOBIN)'
+    mkdir -p '$(GOPATH)/pkg'
+    mkdir -p '$(modulePath)'
+    shopt -s extglob
+    shopt -s dotglob
+    mv !(gopath) '$(modulePath)'
+    echo '##vso[task.prependpath]$(GOBIN)'
+    echo '##vso[task.prependpath]$(GOROOT)/bin'
+  displayName: 'Set up the Go workspace'
+
+- script: |
+    go version
+    go get github.com/golang/dep
+    cd $GOPATH/src/github.com/golang/dep
+    go install ./...
+  workingDirectory: '$(modulePath)'
+  displayName: 'Get dependencies'
+
+- script: |
+    make deps
+    make build
+    
+    cp dyskctl $(Build.ArtifactStagingDirectory)
+  workingDirectory: '$(modulePath)/dyskctl'
+  displayName: 'Build dyskctl'
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: drop
+    publishLocation: Container
+
+- task: AzureCLI@1
+  displayName: Upload binaries to blob storage
+  inputs:
+    azureSubscription: $(azureSubscription)
+    scriptLocation: inlineScript
+    inlineScript: |
+      az storage blob upload-batch -s $(Build.ArtifactStagingDirectory) -d $(blobContainer) --account-name $(storageAccount)
